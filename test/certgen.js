@@ -156,3 +156,39 @@ export function makeCert(opts) {
 
   return SEQ(tbs, SEQ(OID('1.2.840.10045.4.3.2')), BITS(sig, 0));
 }
+
+// ---------- CRL 构造 ----------
+
+// 生成一张 DER 编码的 v2（默认）CRL，ECDSA/SHA-256 签名。
+// revoked: [{ serial: number, date: Date }]；可选字段覆盖版本/时效/签名算法以构造异常清单。
+export function makeCrl(opts) {
+  const {
+    issuerCN,
+    issuerPrivKey,
+    revoked = [],
+    thisUpdate = new Date('2026-09-01T00:00:00Z'),
+    nextUpdate = new Date('2026-11-01T00:00:00Z'),
+    version = 2,          // 2 → 含 [0] EXPLICIT INTEGER(1)；1 → 省略 version 字段
+    includeNextUpdate = true,
+    sigOid = '1.2.840.10045.4.3.2', // ecdsa-with-SHA256
+    extraExtensions = [], // 已编码的 crlExtensions 条目
+    tamperSig = false,
+  } = opts;
+
+  const fields = [];
+  if (version === 2) fields.push(EXPL(0, INT(1))); // v2
+  fields.push(SEQ(OID(sigOid)));
+  fields.push(NAME(issuerCN));
+  fields.push(UTCTIME(thisUpdate));
+  if (includeNextUpdate) fields.push(UTCTIME(nextUpdate));
+  if (revoked.length > 0) {
+    fields.push(SEQ(...revoked.map((r) => SEQ(INT(r.serial), UTCTIME(r.date)))));
+  }
+  if (extraExtensions.length > 0) fields.push(tlv(0xa0, SEQ(...extraExtensions)));
+
+  const tbs = SEQ(...fields);
+  const sig = new Uint8Array(sign('sha256', Buffer.from(tbs), issuerPrivKey)); // DER 格式
+  if (tamperSig) sig[sig.length - 1] ^= 0x01;
+
+  return SEQ(tbs, SEQ(OID(sigOid)), BITS(sig, 0));
+}

@@ -54,6 +54,25 @@ textarea, input {
 
 textarea { resize: vertical; word-break: break-all; }
 
+.check-row { margin-top: 14px; }
+
+.check-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin: 0;
+  cursor: pointer;
+}
+
+.check-label input {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
 .row {
   display: grid;
   grid-template-columns: 1fr 1fr;

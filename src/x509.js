@@ -22,6 +22,7 @@ export const OID = {
   nameConstraints: '2.5.29.30',
   ski: '2.5.29.14',
   aki: '2.5.29.35',
+  crlNumber: '2.5.29.20',
 };
 
 // 已知但与本工具判定无关、允许忽略的扩展（即使标记 critical 也不影响链判定）。
@@ -39,8 +40,7 @@ const ATTR_NAMES = {
 
 const utf8 = new TextDecoder('utf-8');
 
-function parseName(el) {
-  expect(el, 0, 16, 'Name SEQUENCE');
+function parseNameUnchecked(el) {
   const parts = [];
   for (const rdn of children(el)) {
     for (const atv of children(rdn)) {
@@ -54,7 +54,12 @@ function parseName(el) {
   return { der: el.raw, str: parts.join(', ') || '(空名称)' };
 }
 
-function parseTime(el) {
+export function parseName(el) {
+  expect(el, 0, 16, 'Name SEQUENCE');
+  return parseNameUnchecked(el);
+}
+
+export function parseTime(el) {
   const s = utf8.decode(el.value);
   let m;
   if (el.tagClass === 0 && el.tag === 23) { // UTCTime YYMMDDHHMMSSZ

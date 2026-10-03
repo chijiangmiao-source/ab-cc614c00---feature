@@ -57,7 +57,7 @@ async function smoke() {
     allOk &&= step('冒烟：GET / 返回复核页面',
       page.status === 200 && html.includes('离线证书链复核终端'));
 
-    for (const asset of ['/app.js', '/worker.js', '/chain.js', '/style.css']) {
+    for (const asset of ['/app.js', '/worker.js', '/chain.js', '/crl.js', '/style.css']) {
       const r = await fetch(`${BASE}${asset}`);
       allOk &&= step(`冒烟：GET ${asset}`, r.status === 200);
     }

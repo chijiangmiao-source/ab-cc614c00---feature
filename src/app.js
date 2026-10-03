@@ -5,6 +5,8 @@ const $ = (id) => document.getElementById(id);
 const els = {
   anchor: $('anchor'),
   certs: $('certs'),
+  crlCheck: $('crlCheck'),
+  crl: $('crl'),
   dns: $('dns'),
   time: $('time'),
   submit: $('submit'),
@@ -29,6 +31,8 @@ try {
   if (draft) {
     els.anchor.value = draft.anchor || '';
     els.certs.value = draft.certs || '';
+    els.crl.value = draft.crl || '';
+    els.crlCheck.checked = draft.crlCheck === true;
     els.dns.value = draft.dns || '';
     if (draft.time) els.time.value = draft.time;
   }
@@ -39,12 +43,15 @@ function saveDraft() {
   localStorage.setItem(DRAFT_KEY, JSON.stringify({
     anchor: els.anchor.value,
     certs: els.certs.value,
+    crl: els.crl.value,
+    crlCheck: els.crlCheck.checked,
     dns: els.dns.value,
     time: els.time.value,
   }));
 }
-for (const el of [els.anchor, els.certs, els.dns, els.time]) {
+for (const el of [els.anchor, els.certs, els.crl, els.dns, els.time, els.crlCheck]) {
   el.addEventListener('input', saveDraft);
+  el.addEventListener('change', saveDraft);
 }
 
 // —— Worker 通讯
@@ -153,7 +160,14 @@ els.submit.addEventListener('click', async () => {
     if (!dnsName) throw new Error('请填写目标 DNS 名称');
     const t = new Date(els.time.value);
     if (Number.isNaN(t.getTime())) throw new Error('验证时刻非法');
-    payload = { anchorDer, certDers, dnsName, verifyTime: t.getTime() };
+    // 撤销清单为可选：开关启用且粘贴了清单时才解码随提交；
+    // 关闭开关或未提供清单（含空白）时参数缺省，既有裁决与逐级依据不变。
+    const checkCrl = els.crlCheck.checked;
+    let crlDer = null;
+    if (checkCrl && els.crl.value.trim() !== '') {
+      crlDer = b64ToBytes(els.crl.value, '撤销清单');
+    }
+    payload = { anchorDer, certDers, dnsName, verifyTime: t.getTime(), checkCrl, crlDer };
   } catch (e) {
     showError('input', null, null, e.message);
     return;
@@ -169,6 +183,8 @@ els.submit.addEventListener('click', async () => {
 els.clear.addEventListener('click', () => {
   els.anchor.value = '';
   els.certs.value = '';
+  els.crl.value = '';
+  els.crlCheck.checked = false;
   els.dns.value = '';
   els.time.value = toLocalInput(new Date());
   localStorage.removeItem(DRAFT_KEY);

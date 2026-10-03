@@ -5,6 +5,7 @@
 
 import { parseCertificate } from './x509.js';
 import { derEcdsaToRaw, toHex } from './der.js';
+import { parseCrl, verifyCrlSignature } from './crl.js';
 
 export const STAGE_LABELS = {
   input: '输入校验',
@@ -20,6 +21,14 @@ export const STAGE_LABELS = {
   pathlen: 'pathLenConstraint',
   nameconstraint: '名称约束',
   signature: '签名核验',
+  crlparse: '撤销清单解析',
+  crlversion: '撤销清单版本',
+  crlalgorithm: '撤销清单算法',
+  crlextension: '撤销清单关键扩展',
+  crlissuer: '撤销清单签发者',
+  crlvalidity: '撤销清单时效',
+  crlsignature: '撤销清单签名',
+  crl: '叶证书撤销',
   internal: '内部错误',
 };
 
@@ -31,6 +40,68 @@ function fail(stage, level, label, message) {
 
 function iso(ms) {
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+// 在已成立的最终候选链上核验撤销清单。chain[0]=叶，chain[n-1]=锚（解析后的证书对象）。
+// 顺序：解析（v2 / ECDSA-SHA256 准入、保留原始 TBSCertList）→ 叶证书直接签发者名称 →
+//       清单签名（直接签发者 P-256 公钥）→ thisUpdate/nextUpdate 覆盖验证时刻 →
+//       叶序列号是否列入已核验清单。任一环节失败返回首个失败环节。
+async function verifyCrlGate(chain, crlDer, at) {
+  const leaf = chain[0];
+  const issuer = chain[1]; // 叶证书的直接签发者（二级链时即信任锚）
+
+  let crl;
+  try {
+    crl = parseCrl(crlDer);
+  } catch (e) {
+    return { ok: false, stage: e.stage || 'crlparse', level: null, label: '撤销清单', message: e.message };
+  }
+
+  // —— 签发者名称：CRL issuer 必须等于叶证书直接签发者的主体名称
+  if (toHex(crl.issuer.der) !== toHex(issuer.subject.der)) {
+    return {
+      ok: false, stage: 'crlissuer', level: 1, label: issuer.label,
+      message: `撤销清单签发者 “${crl.issuer.str}” 与叶证书直接签发者 “${issuer.subject.str}”（${issuer.label}）不匹配`,
+    };
+  }
+
+  // —— 清单签名：以直接签发者公钥核验原始 TBSCertList 上的 ECDSA/SHA-256 签名
+  if (!(await verifyCrlSignature(issuer, crl))) {
+    return {
+      ok: false, stage: 'crlsignature', level: null, label: '撤销清单',
+      message: `撤销清单签名验证失败：签发者 ${issuer.label}（${issuer.subject.str}）的 P-256 公钥无法验证该清单`,
+    };
+  }
+
+  // —— 时效覆盖：thisUpdate ≤ 验证时刻 ≤ nextUpdate
+  if (at < crl.thisUpdate) {
+    return {
+      ok: false, stage: 'crlvalidity', level: null, label: '撤销清单',
+      message: `撤销清单尚未生效：thisUpdate ${iso(crl.thisUpdate)} 晚于验证时刻 ${iso(at)}`,
+    };
+  }
+  if (at > crl.nextUpdate) {
+    return {
+      ok: false, stage: 'crlvalidity', level: null, label: '撤销清单',
+      message: `撤销清单已过期：nextUpdate ${iso(crl.nextUpdate)} 早于验证时刻 ${iso(at)}`,
+    };
+  }
+
+  // —— 叶序列号查找
+  const hit = crl.revoked.find((r) => r.serial === leaf.serial);
+  if (hit) {
+    return {
+      ok: false, stage: 'crl', level: 0, label: leaf.label,
+      message: `叶证书序列号 ${leaf.serial} 出现在已核验撤销清单中（撤销日期 ${iso(hit.revocationDate)}），拒绝接入`,
+    };
+  }
+
+  return {
+    ok: true,
+    issuerNote: `撤销清单（v2，ECDSA/SHA-256）经其 P-256 公钥验证签名通过，签发者名称一致`,
+    leafNote: `撤销核验：序列号 ${leaf.serial} 未列入 “${issuer.subject.str}” 的已核验清单`
+      + `（${crl.revoked.length} 条撤销记录，thisUpdate ${iso(crl.thisUpdate)} / nextUpdate ${iso(crl.nextUpdate)} 覆盖验证时刻 ${iso(at)}）`,
+  };
 }
 
 // SAN 条目与目标主机名匹配（支持单层通配 *.example.com）。
@@ -168,6 +239,7 @@ async function verifyOneChain(chain, host, at) {
   return {
     ok: true,
     chain: chain.map((c, i) => ({
+      _cert: c,
       level: i,
       label: c.label,
       subject: c.subject.str,
@@ -183,7 +255,9 @@ async function verifyOneChain(chain, host, at) {
 }
 
 // 主入口：anchorDer / certDers 为 Uint8Array，dnsName 为字符串，verifyTime 为毫秒时间戳。
-export async function verifyChainSet({ anchorDer, certDers, dnsName, verifyTime }) {
+// checkCrl=true 时 crlDer 为可选撤销清单（DER）；关闭开关或未提供清单时，
+// 既有证书链的裁决和逐级依据完全不变。
+export async function verifyChainSet({ anchorDer, certDers, dnsName, verifyTime, checkCrl = false, crlDer = null }) {
   if (!anchorDer || anchorDer.length === 0) return fail('input', null, null, '缺少信任锚证书');
   if (!Array.isArray(certDers) || certDers.length === 0) {
     return fail('input', null, null, '至少需要 1 张候选证书（叶证书）');
@@ -303,8 +377,21 @@ export async function verifyChainSet({ anchorDer, certDers, dnsName, verifyTime 
   const failures = [];
   for (const cand of candidates) {
     const res = await verifyOneChain(cand, host, at);
-    if (res.ok) return res;
-    failures.push(res);
+    if (!res.ok) {
+      failures.push(res);
+      continue;
+    }
+
+    // —— 最终候选链上的撤销清单闸门（可选；关闭或未提供时结论与逐级依据不变）
+    if (checkCrl && crlDer && crlDer.length > 0) {
+      const gate = await verifyCrlGate(cand, crlDer, at);
+      if (!gate.ok) return gate;
+      res.chain[1].notes.push(gate.issuerNote);
+      res.chain[0].notes.push(gate.leafNote);
+    }
+
+    for (const c of res.chain) delete c._cert;
+    return res;
   }
   failures.sort((a, b) => b.progress - a.progress);
   const best = failures[0];
