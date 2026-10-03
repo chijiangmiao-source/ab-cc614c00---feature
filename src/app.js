@@ -7,6 +7,9 @@ const els = {
   certs: $('certs'),
   dns: $('dns'),
   time: $('time'),
+  crlEnable: $('crl-enable'),
+  crl: $('crl'),
+  crlBox: $('crl-box'),
   submit: $('submit'),
   clear: $('clear'),
   status: $('status'),
@@ -31,9 +34,20 @@ try {
     els.certs.value = draft.certs || '';
     els.dns.value = draft.dns || '';
     if (draft.time) els.time.value = draft.time;
+    els.crl.value = draft.crl || '';
+    els.crlEnable.checked = draft.crlEnabled === true;
   }
 } catch { /* 忽略损坏的草稿 */ }
 if (!els.time.value) els.time.value = toLocalInput(new Date());
+
+function syncCrlBox() {
+  els.crlBox.hidden = !els.crlEnable.checked;
+}
+syncCrlBox();
+els.crlEnable.addEventListener('change', () => {
+  syncCrlBox();
+  saveDraft();
+});
 
 function saveDraft() {
   localStorage.setItem(DRAFT_KEY, JSON.stringify({
@@ -41,9 +55,11 @@ function saveDraft() {
     certs: els.certs.value,
     dns: els.dns.value,
     time: els.time.value,
+    crl: els.crl.value,
+    crlEnabled: els.crlEnable.checked,
   }));
 }
-for (const el of [els.anchor, els.certs, els.dns, els.time]) {
+for (const el of [els.anchor, els.certs, els.dns, els.time, els.crl]) {
   el.addEventListener('input', saveDraft);
 }
 
@@ -153,7 +169,14 @@ els.submit.addEventListener('click', async () => {
     if (!dnsName) throw new Error('请填写目标 DNS 名称');
     const t = new Date(els.time.value);
     if (Number.isNaN(t.getTime())) throw new Error('验证时刻非法');
-    payload = { anchorDer, certDers, dnsName, verifyTime: t.getTime() };
+    const crlEnabled = els.crlEnable.checked;
+    let crlDer = null;
+    if (crlEnabled) {
+      // 清单可选：开关开启但未粘贴清单时，按“未提供清单”处理，既有裁决不变。
+      const crlText = els.crl.value.trim();
+      if (crlText) crlDer = b64ToBytes(crlText, 'CRL 撤销清单');
+    }
+    payload = { anchorDer, certDers, dnsName, verifyTime: t.getTime(), crlEnabled, crlDer };
   } catch (e) {
     showError('input', null, null, e.message);
     return;
@@ -170,6 +193,9 @@ els.clear.addEventListener('click', () => {
   els.anchor.value = '';
   els.certs.value = '';
   els.dns.value = '';
+  els.crl.value = '';
+  els.crlEnable.checked = false;
+  syncCrlBox();
   els.time.value = toLocalInput(new Date());
   localStorage.removeItem(DRAFT_KEY);
   els.result.replaceChildren();

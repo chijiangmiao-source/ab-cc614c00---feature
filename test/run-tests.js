@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { verifyChainSet, hostMatch, dnsWithin } from '../src/chain.js';
 import { derEcdsaToRaw } from '../src/der.js';
-import { makeCert, makeKeys, extn, OCT, SEQ } from './certgen.js';
+import { makeCert, makeKeys, makeCrl, extn, OCT, SEQ } from './certgen.js';
 
 const T = Date.parse('2026-10-01T12:00:00Z'); // 验证时刻（有效期内）
 const NB = new Date('2026-01-01T00:00:00Z');
@@ -359,6 +359,230 @@ const run = (anchor, certs, dns = 'app.example.com', at = T) =>
   const atNotAfter = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', NA.getTime());
   ok('场景21：验证时刻取 notAfter 端点 → 成立', assertOk(atNotAfter, '边界') === true,
     atNotAfter.ok ? '' : atNotAfter.message);
+}
+
+// ---------- CRL 场景 ----------
+
+const CRL_THIS = new Date('2026-09-01T00:00:00Z');
+const CRL_NEXT = new Date('2026-11-01T00:00:00Z');
+const runCrl = (anchor, certs, crlDer, dns = 'app.example.com', at = T) =>
+  verifyChainSet({
+    anchorDer: anchor, certDers: certs, dnsName: dns, verifyTime: at,
+    crlEnabled: true, crlDer,
+  });
+
+// ---------- 场景 22：开关关闭 / 未提供清单 → 裁决不变 ----------
+{
+  const w = buildWorld();
+  const crlRevoking = makeCrl({
+    issuerCN: 'Inter CA', issuerPrivKey: w.interK.privateKey,
+    revoked: [{ serial: 300, date: CRL_THIS }],
+    thisUpdate: CRL_THIS, nextUpdate: CRL_NEXT,
+  });
+  // 开关关闭：即使传入（语义上不会传）撤销叶证书的清单，结论仍成立
+  const resOff = await verifyChainSet({
+    anchorDer: w.anchor, certDers: [w.leaf, w.inter], dnsName: 'app.example.com', verifyTime: T,
+    crlEnabled: false, crlDer: null,
+  });
+  ok('场景22a：开关关闭 → 既有链裁决不变（成立）', assertOk(resOff, '关闭开关') === true,
+    resOff.ok ? '' : resOff.message);
+  // 开关开启但未提供清单 → 清单可选，跳过 CRL 核验，既有裁决不变
+  const resNoCrl = await verifyChainSet({
+    anchorDer: w.anchor, certDers: [w.leaf, w.inter], dnsName: 'app.example.com', verifyTime: T,
+    crlEnabled: true, crlDer: null,
+  });
+  ok('场景22b：开关开启但未提供清单 → 视为未提供，裁决不变（成立）',
+    assertOk(resNoCrl, '无清单') === true,
+    resNoCrl.ok ? '' : resNoCrl.message);
+  // 关闭开关时即便给出清单字节也不予核验
+  const resOffBytes = await verifyChainSet({
+    anchorDer: w.anchor, certDers: [w.leaf, w.inter], dnsName: 'app.example.com', verifyTime: T,
+    crlEnabled: false, crlDer: crlRevoking,
+  });
+  ok('场景22c：开关关闭时清单字节被忽略，叶证书不被撤销', assertOk(resOffBytes, '关闭忽略清单') === true,
+    resOffBytes.ok ? '' : resOffBytes.message);
+}
+
+// ---------- 场景 23：有效 CRL，叶证书未被撤销 → 成立并附依据 ----------
+{
+  const w = buildWorld();
+  const crl = makeCrl({
+    issuerCN: 'Inter CA', issuerPrivKey: w.interK.privateKey,
+    revoked: [{ serial: 999, date: CRL_THIS }], // 撤销的是别的序列号
+    thisUpdate: CRL_THIS, nextUpdate: CRL_NEXT,
+  });
+  const res = await runCrl(w.anchor, [w.leaf, w.inter], crl);
+  ok('场景23：有效 CRL 未列叶序列号 → 成立', assertOk(res, 'CRL 干净') === true,
+    res.ok ? '' : res.message);
+  if (res.ok) {
+    const note = res.chain[0].notes.find((n) => n.includes('CRL 撤销核验通过'));
+    ok('场景23：叶级别展示 CRL 核验依据', !!note, note || '缺少 CRL 通过说明');
+  }
+}
+
+// ---------- 场景 24：叶序列号在清单中 → 拒绝(crl) 并展示条目 ----------
+{
+  const w = buildWorld();
+  const crl = makeCrl({
+    issuerCN: 'Inter CA', issuerPrivKey: w.interK.privateKey,
+    revoked: [
+      { serial: 300, date: new Date('2026-09-20T00:00:00Z') },
+      { serial: 301, date: CRL_THIS },
+    ],
+    thisUpdate: CRL_THIS, nextUpdate: CRL_NEXT,
+  });
+  const res = await runCrl(w.anchor, [w.leaf, w.inter], crl);
+  ok('场景24：叶序列号被列入 CRL → 拒绝(crl) 并定位叶证书',
+    assertFail(res, 'crl', '已撤销') === true && res.level === 0,
+    res.ok ? '意外成功' : `[${res.stage}] L${res.level} ${res.message}`);
+  if (!res.ok) {
+    ok('场景24：失败信息展示对应撤销条目（序列号/撤销时间）',
+      res.message.includes('012c') && res.message.includes('2026-09-20'),
+      res.message);
+  }
+}
+
+// ---------- 场景 25：二级链（直接签发者为锚）CRL 撤销 ----------
+{
+  const w = buildWorld({ inter: null });
+  const crl = makeCrl({
+    issuerCN: 'Root CA', issuerPrivKey: w.rootK.privateKey,
+    revoked: [{ serial: 300, date: CRL_THIS }],
+    thisUpdate: CRL_THIS, nextUpdate: CRL_NEXT,
+  });
+  const res = await runCrl(w.anchor, [w.leaf], crl);
+  ok('场景25：叶直签于锚，锚签发的 CRL 列入叶 → 拒绝(crl)',
+    assertFail(res, 'crl', '锚 CRL 撤销') === true && res.level === 0,
+    res.ok ? '意外成功' : `[${res.stage}] L${res.level} ${res.message}`);
+}
+
+// ---------- 场景 26：CRL 签发者名称与直接签发者不匹配 → 拒绝(crl) ----------
+{
+  const w = buildWorld();
+  // 清单名称是锚而非叶的直接签发者（Inter CA），即使签名本身有效也必须拒绝
+  const crl = makeCrl({
+    issuerCN: 'Root CA', issuerPrivKey: w.rootK.privateKey,
+    revoked: [], thisUpdate: CRL_THIS, nextUpdate: CRL_NEXT,
+  });
+  const res = await runCrl(w.anchor, [w.leaf, w.inter], crl);
+  ok('场景26：CRL 签发者非叶直接签发者 → 拒绝(crl) 定位签发者级别',
+    assertFail(res, 'crl', '签发者不匹配') === true && res.level === 1,
+    res.ok ? '意外成功' : `[${res.stage}] L${res.level} ${res.message}`);
+}
+
+// ---------- 场景 27：CRL 签名不符 → 拒绝(crl) ----------
+{
+  const w = buildWorld();
+  const wrongK = makeKeys();
+  // 名称与 Inter CA 相同，但用他人私钥签名
+  const crl = makeCrl({
+    issuerCN: 'Inter CA', issuerPrivKey: w.interK.privateKey, signKey: wrongK.privateKey,
+    revoked: [], thisUpdate: CRL_THIS, nextUpdate: CRL_NEXT,
+  });
+  const res = await runCrl(w.anchor, [w.leaf, w.inter], crl);
+  ok('场景27a：CRL 签名密钥不符 → 拒绝(crl)',
+    assertFail(res, 'crl', '签名不符') === true && res.level === 1,
+    res.ok ? '意外成功' : `[${res.stage}] L${res.level} ${res.message}`);
+  // 篡改签名字节
+  const crlTampered = makeCrl({
+    issuerCN: 'Inter CA', issuerPrivKey: w.interK.privateKey,
+    revoked: [], thisUpdate: CRL_THIS, nextUpdate: CRL_NEXT, tamperSig: true,
+  });
+  const res2 = await runCrl(w.anchor, [w.leaf, w.inter], crlTampered);
+  ok('场景27b：CRL 签名被篡改 → 拒绝(crl)',
+    assertFail(res2, 'crl', '签名篡改') === true && res2.level === 1,
+    res2.ok ? '意外成功' : `[${res2.stage}] L${res2.level} ${res2.message}`);
+}
+
+// ---------- 场景 28：CRL 过期 / 尚未生效 → 拒绝(crl) ----------
+{
+  const w = buildWorld();
+  const expired = makeCrl({
+    issuerCN: 'Inter CA', issuerPrivKey: w.interK.privateKey,
+    revoked: [],
+    thisUpdate: new Date('2026-01-01T00:00:00Z'), nextUpdate: new Date('2026-06-01T00:00:00Z'),
+  });
+  const resExp = await runCrl(w.anchor, [w.leaf, w.inter], expired);
+  ok('场景28a：CRL 已过期（nextUpdate 早于验证时刻）→ 拒绝(crl)',
+    assertFail(resExp, 'crl', 'CRL 过期') === true && resExp.level === 1,
+    resExp.ok ? '意外成功' : `[${resExp.stage}] L${resExp.level} ${resExp.message}`);
+  const future = makeCrl({
+    issuerCN: 'Inter CA', issuerPrivKey: w.interK.privateKey,
+    revoked: [],
+    thisUpdate: new Date('2026-12-01T00:00:00Z'), nextUpdate: new Date('2027-06-01T00:00:00Z'),
+  });
+  const resFuture = await runCrl(w.anchor, [w.leaf, w.inter], future);
+  ok('场景28b：CRL 尚未生效（thisUpdate 晚于验证时刻）→ 拒绝(crl)',
+    assertFail(resFuture, 'crl', 'CRL 未生效') === true && resFuture.level === 1,
+    resFuture.ok ? '意外成功' : `[${resFuture.stage}] L${resFuture.level} ${resFuture.message}`);
+  // 边界：验证时刻恰为 nextUpdate 端点 → 覆盖，成立
+  const atEdge = new Date('2026-11-01T00:00:00Z').getTime();
+  const edge = makeCrl({
+    issuerCN: 'Inter CA', issuerPrivKey: w.interK.privateKey,
+    revoked: [], thisUpdate: CRL_THIS, nextUpdate: CRL_NEXT,
+  });
+  const resEdge = await runCrl(w.anchor, [w.leaf, w.inter], edge, 'app.example.com', atEdge);
+  ok('场景28c：验证时刻取 nextUpdate 端点 → 覆盖成立', assertOk(resEdge, 'CRL 端点') === true,
+    resEdge.ok ? '' : resEdge.message);
+}
+
+// ---------- 场景 29：CRL 准入：v1 / 错误算法 / 截断 DER → 拒绝 ----------
+{
+  const w = buildWorld();
+  const v1 = makeCrl({
+    issuerCN: 'Inter CA', issuerPrivKey: w.interK.privateKey,
+    version2: false, revoked: [], thisUpdate: CRL_THIS, nextUpdate: CRL_NEXT,
+  });
+  const resV1 = await runCrl(w.anchor, [w.leaf, w.inter], v1);
+  ok('场景29a：CRL v1 不接受 → 拒绝(parse)',
+    assertFail(resV1, 'parse', 'v1') === true && resV1.label === 'CRL 撤销清单',
+    resV1.ok ? '意外成功' : `[${resV1.stage}] ${resV1.label} ${resV1.message}`);
+  const badAlg = makeCrl({
+    issuerCN: 'Inter CA', issuerPrivKey: w.interK.privateKey,
+    algOid: '1.2.840.10045.4.3.3', // ecdsa-with-SHA384
+    revoked: [], thisUpdate: CRL_THIS, nextUpdate: CRL_NEXT,
+  });
+  const resAlg = await runCrl(w.anchor, [w.leaf, w.inter], badAlg);
+  ok('场景29b：非 ECDSA/SHA-256 算法的 CRL → 拒绝(algorithm)',
+    assertFail(resAlg, 'algorithm', '算法准入') === true,
+    resAlg.ok ? '意外成功' : `[${resAlg.stage}] ${resAlg.message}`);
+  const good = makeCrl({
+    issuerCN: 'Inter CA', issuerPrivKey: w.interK.privateKey,
+    revoked: [], thisUpdate: CRL_THIS, nextUpdate: CRL_NEXT,
+  });
+  const truncated = good.slice(0, good.length - 12);
+  const resTrunc = await runCrl(w.anchor, [w.leaf, w.inter], truncated);
+  ok('场景29c：截断 CRL DER → 拒绝(parse)',
+    assertFail(resTrunc, 'parse', '截断 CRL') === true,
+    resTrunc.ok ? '意外成功' : `[${resTrunc.stage}] ${resTrunc.message}`);
+}
+
+// ---------- 场景 30：链本身失败时不因 CRL 掩盖首个失败环节 ----------
+{
+  const w = buildWorld({ leaf: { tamperSig: true } });
+  const crl = makeCrl({
+    issuerCN: 'Inter CA', issuerPrivKey: w.interK.privateKey,
+    revoked: [{ serial: 300, date: CRL_THIS }],
+    thisUpdate: CRL_THIS, nextUpdate: CRL_NEXT,
+  });
+  const res = await runCrl(w.anchor, [w.leaf, w.inter], crl);
+  ok('场景30：证书链签名失败优先暴露 → 拒绝(signature) 而非 crl',
+    assertFail(res, 'signature', '链失败优先') === true,
+    res.ok ? '意外成功' : `[${res.stage}] ${res.message}`);
+}
+
+// ---------- 场景 31：高位为 1 的序列号（证书 DER 带前导 00）仍能匹配撤销条目 ----------
+{
+  const w = buildWorld({ leaf: { serial: 0x80ff } }); // 33023，DER 编码为 00 80 ff
+  const crl = makeCrl({
+    issuerCN: 'Inter CA', issuerPrivKey: w.interK.privateKey,
+    revoked: [{ serial: 0x80ff, date: CRL_THIS }],
+    thisUpdate: CRL_THIS, nextUpdate: CRL_NEXT,
+  });
+  const res = await runCrl(w.anchor, [w.leaf, w.inter], crl);
+  ok('场景31：前导 00 的序列号按整数语义匹配 → 拒绝(crl)',
+    assertFail(res, 'crl', '高位序列号撤销') === true && res.level === 0,
+    res.ok ? '意外成功' : `[${res.stage}] L${res.level} ${res.message}`);
 }
 
 console.log(`\n${passed} 项通过，${failed} 项失败`);

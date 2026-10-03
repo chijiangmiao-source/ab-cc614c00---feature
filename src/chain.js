@@ -1,9 +1,11 @@
 // chain.js — 候选链构造与逐级核验。
 // 流程：解析 → 摘要去重 → 叶证书候选 → DFS 构造叶→锚候选链 →
 //       按 SHA-256 摘要序稳定排序 → 逐级核验（有效期 / CA 与 keyUsage /
-//       pathLenConstraint / 累积 DNS 名称约束 / 签名）→ 多链取摘要序最小者。
+//       pathLenConstraint / 累积 DNS 名称约束 / 签名）→ 多链取摘要序最小者 →
+//       可选：以最终候选链中叶证书的直接签发者核验 CRL（v2 / P-256 ECDSA-SHA256）。
 
 import { parseCertificate } from './x509.js';
+import { parseCrl } from './crl.js';
 import { derEcdsaToRaw, toHex } from './der.js';
 
 export const STAGE_LABELS = {
@@ -20,6 +22,7 @@ export const STAGE_LABELS = {
   pathlen: 'pathLenConstraint',
   nameconstraint: '名称约束',
   signature: '签名核验',
+  crl: 'CRL 撤销核验',
   internal: '内部错误',
 };
 
@@ -82,6 +85,91 @@ async function verifySignature(issuerCert, cert) {
   } catch {
     return false;
   }
+}
+
+// 以签发者 P-256 公钥核验 CRL 签名（签名对象为原始 tbsCertList 字节）。
+async function verifyCrlSignature(issuerCert, crl) {
+  try {
+    const key = await globalThis.crypto.subtle.importKey(
+      'spki', issuerCert.spkiRaw, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify'],
+    );
+    const rawSig = derEcdsaToRaw(crl.signatureDer, 32);
+    return await globalThis.crypto.subtle.verify(
+      { name: 'ECDSA', hash: { name: 'SHA-256' } }, key, rawSig, crl.tbs,
+    );
+  } catch {
+    return false;
+  }
+}
+
+// 序列号按整数语义比较：两侧均为证书/CRL 中 INTEGER 内容的十六进制，
+// 去掉 DER 的前导 0x00 符号填充后再比较。
+function serialEqual(a, b) {
+  const norm = (h) => h.replace(/^(00)+/, '');
+  return norm(String(a).toLowerCase()) === norm(String(b).toLowerCase());
+}
+
+// 对已成立的最终候选链执行 CRL 撤销核验。
+// 顺序：签发者名称 → 清单签名 → thisUpdate/nextUpdate 覆盖验证时刻 → 叶序列号是否列入。
+// 成功返回追加到叶级别的依据说明；失败返回 {ok:false, stage, level, label, message}。
+async function verifyLeafCrl(crlInput, chain, at) {
+  const leaf = chain[0];
+  const issuer = chain[1]; // 叶证书的直接签发者（二级链时即信任锚）
+
+  let crl;
+  try {
+    crl = parseCrl(crlInput);
+  } catch (e) {
+    return { ok: false, stage: e.stage || 'parse', level: null, label: 'CRL 撤销清单', message: e.message };
+  }
+
+  // 1) 签发者名称必须与叶证书直接签发者主体一致
+  if (toHex(crl.issuer.der) !== toHex(issuer.subject.der)) {
+    return {
+      ok: false, stage: 'crl', level: 1, label: issuer.label,
+      message: `CRL 签发者 “${crl.issuer.str}” 与叶证书直接签发者 “${issuer.subject.str}” 不匹配`,
+    };
+  }
+
+  // 2) 以直接签发者公钥核验清单签名
+  if (!(await verifyCrlSignature(issuer, crl))) {
+    return {
+      ok: false, stage: 'crl', level: 1, label: issuer.label,
+      message: `CRL 签名核验失败：签发者 ${issuer.label}（${issuer.subject.str}）的 P-256 公钥无法验证该清单`,
+    };
+  }
+
+  // 3) thisUpdate / nextUpdate 必须覆盖验证时刻
+  if (at < crl.thisUpdate) {
+    return {
+      ok: false, stage: 'crl', level: 1, label: issuer.label,
+      message: `CRL 尚未生效：thisUpdate=${iso(crl.thisUpdate)} 晚于验证时刻 ${iso(at)}`,
+    };
+  }
+  if (at > crl.nextUpdate) {
+    return {
+      ok: false, stage: 'crl', level: 1, label: issuer.label,
+      message: `CRL 已过期：nextUpdate=${iso(crl.nextUpdate)} 早于验证时刻 ${iso(at)}`,
+    };
+  }
+
+  // 4) 叶证书序列号是否出现在已核验清单中
+  const hit = crl.revoked.find((r) => serialEqual(r.serial, leaf.serial));
+  if (hit) {
+    return {
+      ok: false, stage: 'crl', level: 0, label: leaf.label,
+      message: `叶证书序列号 ${leaf.serial} 出现在已核验 CRL 撤销清单中`
+        + `（撤销时间 ${iso(hit.revocationDate)}，清单共 ${crl.revoked.length} 条，thisUpdate ${iso(crl.thisUpdate)}）`,
+    };
+  }
+
+  return {
+    ok: true,
+    issuerName: issuer.subject.str,
+    thisUpdate: iso(crl.thisUpdate),
+    nextUpdate: iso(crl.nextUpdate),
+    revokedCount: crl.revoked.length,
+  };
 }
 
 // 核验单条候选链（chain[0]=叶，chain[n-1]=锚）。成功返回逐级依据，失败返回首个失败环节。
@@ -183,7 +271,10 @@ async function verifyOneChain(chain, host, at) {
 }
 
 // 主入口：anchorDer / certDers 为 Uint8Array，dnsName 为字符串，verifyTime 为毫秒时间戳。
-export async function verifyChainSet({ anchorDer, certDers, dnsName, verifyTime }) {
+// crlEnabled 为真且 crlDer 非空时，在最终候选链成立后追加叶证书 CRL 撤销核验；
+// 关闭开关或未提供清单时，证书链裁决与逐级依据与原先完全一致。
+export async function verifyChainSet({ anchorDer, certDers, dnsName, verifyTime, crlEnabled, crlDer }) {
+  const useCrl = crlEnabled === true && crlDer && crlDer.length > 0;
   if (!anchorDer || anchorDer.length === 0) return fail('input', null, null, '缺少信任锚证书');
   if (!Array.isArray(certDers) || certDers.length === 0) {
     return fail('input', null, null, '至少需要 1 张候选证书（叶证书）');
@@ -303,8 +394,21 @@ export async function verifyChainSet({ anchorDer, certDers, dnsName, verifyTime 
   const failures = [];
   for (const cand of candidates) {
     const res = await verifyOneChain(cand, host, at);
-    if (res.ok) return res;
-    failures.push(res);
+    if (!res.ok) {
+      failures.push(res);
+      continue;
+    }
+    // 最终候选链已成立；启用 CRL 时对其叶证书追加撤销核验。
+    if (useCrl) {
+      const crlRes = await verifyLeafCrl(crlDer, cand, at);
+      if (!crlRes.ok) return fail(crlRes.stage, crlRes.level, crlRes.label, crlRes.message);
+      res.chain[0].notes.push(
+        `CRL 撤销核验通过：清单签发者 “${crlRes.issuerName}”，`
+        + `thisUpdate ${crlRes.thisUpdate} ~ nextUpdate ${crlRes.nextUpdate} 覆盖验证时刻，`
+        + `叶证书序列号未列入撤销条目（清单共 ${crlRes.revokedCount} 条）`,
+      );
+    }
+    return res;
   }
   failures.sort((a, b) => b.progress - a.progress);
   const best = failures[0];

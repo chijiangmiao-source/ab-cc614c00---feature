@@ -156,3 +156,56 @@ export function makeCert(opts) {
 
   return SEQ(tbs, SEQ(OID('1.2.840.10045.4.3.2')), BITS(sig, 0));
 }
+
+// ---------- CRL 构造 ----------
+
+const crlTime = (d) => UTCTIME(d);
+
+// 生成一份 v2（默认）/ P-256 ECDSA-SHA256 CRL（DER Uint8Array）。
+// opts:
+//   issuerCN / issuerPrivKey  清单签发者名称与签名私钥
+//   revoked [{serial, date}]  撤销条目
+//   thisUpdate / nextUpdate   覆盖区间
+//   version2=false            生成 v1（无 version 字段、无扩展）
+//   algOid                     覆盖签名算法 OID（用于准入拒绝测试，签名仍用 sha256）
+//   signKey                    覆盖实际签名私钥（用于签名不符测试）
+//   withExtensions=false       v2 时省略 crlExtensions
+//   tamperSig=true             篡改签名字节
+export function makeCrl(opts = {}) {
+  const {
+    issuerCN = 'Root CA',
+    issuerPrivKey,
+    revoked = [],
+    thisUpdate = new Date('2026-09-01T00:00:00Z'),
+    nextUpdate = new Date('2026-11-01T00:00:00Z'),
+    version2 = true,
+    algOid = '1.2.840.10045.4.3.2',
+    signKey = null,
+    withExtensions = true,
+    tamperSig = false,
+  } = opts;
+
+  const fields = [];
+  if (version2) fields.push(EXPL(0, INT(1))); // v2 = INTEGER 1
+  fields.push(SEQ(OID(algOid)));
+  fields.push(NAME(issuerCN));
+  fields.push(crlTime(thisUpdate));
+  fields.push(crlTime(nextUpdate));
+  if (revoked.length > 0) {
+    fields.push(SEQ(...revoked.map((r) => SEQ(
+      INT(r.serial),
+      crlTime(r.date || thisUpdate),
+    ))));
+  }
+  if (version2 && withExtensions) {
+    // CRL number（2.5.29.20）非关键，证明确为 v2 清单
+    fields.push(tlv(0xa0, SEQ(extn('2.5.29.20', false, INT(1)))));
+  }
+  const tbs = SEQ(...fields);
+
+  const sigKey = signKey || issuerPrivKey;
+  const sig = new Uint8Array(sign('sha256', Buffer.from(tbs), sigKey));
+  if (tamperSig) sig[sig.length - 1] ^= 0x01;
+
+  return SEQ(tbs, SEQ(OID(algOid)), BITS(sig, 0));
+}

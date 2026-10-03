@@ -39,7 +39,7 @@ const ATTR_NAMES = {
 
 const utf8 = new TextDecoder('utf-8');
 
-function parseName(el) {
+export function parseName(el) {
   expect(el, 0, 16, 'Name SEQUENCE');
   const parts = [];
   for (const rdn of children(el)) {
@@ -54,7 +54,7 @@ function parseName(el) {
   return { der: el.raw, str: parts.join(', ') || '(空名称)' };
 }
 
-function parseTime(el) {
+export function parseTime(el) {
   const s = utf8.decode(el.value);
   let m;
   if (el.tagClass === 0 && el.tag === 23) { // UTCTime YYMMDDHHMMSSZ
