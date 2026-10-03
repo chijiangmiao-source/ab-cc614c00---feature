@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>离线证书链复核终端</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main>
+    <h1>离线证书链复核终端</h1>
+    <p class="hint">
+      仅接受 <strong>X.509 v3</strong>、<strong>P-256 ECDSA / SHA-256</strong> 证书。
+      验证在浏览器 Worker 中本地完成，证书内容不会离开本机。
+    </p>
+
+    <section class="panel">
+      <label for="anchor">信任锚证书（单张，DER 的 Base64）</label>
+      <textarea id="anchor" rows="4" spellcheck="false"
+        placeholder="粘贴信任锚证书的 Base64（DER 编码，单行）"></textarea>
+
+      <label for="certs">候选证书（每行一张，至多 7 张，顺序不限）</label>
+      <textarea id="certs" rows="8" spellcheck="false"
+        placeholder="每行粘贴一张证书的 Base64（DER 编码），含叶证书与可能的中间 CA"></textarea>
+
+      <div class="row">
+        <div>
+          <label for="dns">目标 DNS 名称</label>
+          <input id="dns" type="text" placeholder="例如 app.example.com" autocomplete="off">
+        </div>
+        <div>
+          <label for="time">验证时刻</label>
+          <input id="time" type="datetime-local">
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="submit" type="button">提交复核</button>
+        <button id="clear" type="button" class="secondary">清空草稿</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div id="status" class="status">待提交</div>
+      <div id="result"></div>
+    </section>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

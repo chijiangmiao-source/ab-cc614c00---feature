@@ -1,0 +1,121 @@
+:root {
+  color-scheme: light;
+  --fg: #1c2430;
+  --muted: #5b6672;
+  --line: #d5dbe3;
+  --ok: #0a7d3b;
+  --fail: #b3261e;
+  --accent: #1a5fd7;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  color: var(--fg);
+  background: #f4f6f9;
+}
+
+main {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 24px 16px 64px;
+}
+
+h1 { font-size: 1.4rem; margin: 8px 0 4px; }
+
+.hint { color: var(--muted); font-size: 0.9rem; margin: 0 0 16px; }
+
+.panel {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin: 12px 0 4px;
+}
+
+textarea, input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  background: #fbfcfe;
+}
+
+textarea { resize: vertical; word-break: break-all; }
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.actions { margin-top: 16px; display: flex; gap: 10px; }
+
+button {
+  border: none;
+  border-radius: 6px;
+  padding: 9px 22px;
+  font-size: 0.95rem;
+  cursor: pointer;
+  background: var(--accent);
+  color: #fff;
+}
+
+button:disabled { opacity: 0.6; cursor: wait; }
+
+button.secondary {
+  background: #fff;
+  color: var(--fg);
+  border: 1px solid var(--line);
+}
+
+.status { font-weight: 700; margin-bottom: 10px; }
+.status.ok { color: var(--ok); }
+.status.fail { color: var(--fail); }
+
+.error {
+  border: 1px solid var(--fail);
+  background: #fdf1f0;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+ol.chain { list-style: none; margin: 0; padding: 0; }
+
+ol.chain > li {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--ok);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.cert-head { font-weight: 700; font-size: 0.95rem; }
+
+.fp {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  color: var(--muted);
+  word-break: break-all;
+  margin: 4px 0 6px;
+}
+
+ol.chain ul {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 0.86rem;
+  line-height: 1.7;
+}

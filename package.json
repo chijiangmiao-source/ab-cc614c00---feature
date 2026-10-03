@@ -1,0 +1,13 @@
+{
+  "name": "cert-chain-review",
+  "version": "1.0.0",
+  "private": true,
+  "description": "离线证书链复核终端：浏览器 Worker 内完成受限 X.509 信任链验证",
+  "type": "module",
+  "scripts": {
+    "build": "node build.js",
+    "start": "node server.js",
+    "test": "node test/run-tests.js",
+    "verify": "node verify/run.js"
+  }
+}

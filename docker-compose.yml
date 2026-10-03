@@ -1,0 +1,18 @@
+services:
+  # 页面服务：HOST_PORT 环境变量可配置宿主端口（默认 8080）
+  web:
+    build: .
+    environment:
+      PORT: 8080
+    ports:
+      - "${HOST_PORT:-8080}:8080"
+    restart: unless-stopped
+
+  # 单次验收容器：逻辑测试 + 页面构建 + HTTP 冒烟，以退出码报告结果
+  # 用法：docker compose run --rm verify
+  #   或：docker compose up --exit-code-from verify verify
+  verify:
+    build: .
+    command: ["node", "verify/run.js"]
+    environment:
+      VERIFY_PORT: 8123
